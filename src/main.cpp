@@ -41,7 +41,7 @@ private:
   static constexpr bool enableValidationLayers = true;
   #endif
 
-  uint32_t graphicsFamily, presentFamily;
+  uint32_t queueIndex;
 
   std::vector<vk::Image> swapchainImages;
   vk::Format swapchainFormat = vk::Format::eUndefined;
@@ -54,8 +54,7 @@ private:
   vk::raii::SurfaceKHR surface = nullptr;
   vk::raii::PhysicalDevice physicalDevice = nullptr;
   vk::raii::Device device = nullptr;
-  vk::raii::Queue graphicsQueue = nullptr;
-  vk::raii::Queue presentQueue = nullptr;
+  vk::raii::Queue queue = nullptr;
   vk::raii::SwapchainKHR swapchain = nullptr;
   vk::raii::PipelineLayout pipelineLayout = nullptr;
   vk::raii::Pipeline pipeline = nullptr;
@@ -82,6 +81,7 @@ private:
     createImageViews();
     createGraphicsPipeline();
     createCommandPool();
+    createCommandBuffer();
     createSyncObjects();
   }
 
@@ -103,7 +103,7 @@ private:
     auto layerProps = context.enumerateInstanceLayerProperties();
     if (std::ranges::any_of(requiredLayers, [&](auto const &requiredLayer) {
         return std::ranges::none_of(layerProps, [&](auto const &layerProp) {
-          return strcmp(layerProp.layerName, requiredLayer);
+          return strcmp(layerProp.layerName, requiredLayer) == 0;
         });
     })) {
       throw std::runtime_error("some required layers are unsupported");
@@ -116,7 +116,7 @@ private:
     auto extProps = context.enumerateInstanceExtensionProperties();
     if (std::ranges::any_of(requiredExts, [&](auto const &requiredExt) {
         return std::ranges::none_of(extProps, [&](auto const &extProp) {
-          return strcmp(extProp.extensionName, requiredExt);
+          return strcmp(extProp.extensionName, requiredExt) == 0;
         });
     })) {
       throw std::runtime_error("some required extensions are unsupported");
@@ -143,9 +143,8 @@ private:
     auto glfwExts = glfwGetRequiredInstanceExtensions(&extCount);
 
     std::vector extensions(glfwExts, glfwExts + extCount);
-    if (enableValidationLayers) {
+    if (enableValidationLayers)
       extensions.push_back(vk::EXTDebugUtilsExtensionName);
-    }
 
     std::cout << "required extensions:" << std::endl;
     for (const auto& extension : extensions) {
@@ -221,9 +220,20 @@ private:
       auto extensions = device.enumerateDeviceExtensionProperties();
       for (auto const &ext : deviceExtensions) {
         if (std::ranges::none_of(extensions, [&](auto const &deviceExt) {
-          return strcmp(ext, deviceExt.extensionName);
+          return strcmp(ext, deviceExt.extensionName) == 0;
         })) goto continu;
       }
+
+      auto features = device.getFeatures2<vk::PhysicalDeviceFeatures2,
+        vk::PhysicalDeviceVulkan11Features, vk::PhysicalDeviceVulkan13Features,
+        vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
+      if (!features.get<vk::PhysicalDeviceVulkan11Features>()
+            .shaderDrawParameters ||
+          !features.get<vk::PhysicalDeviceVulkan13Features>()
+            .dynamicRendering ||
+          !features.get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>()
+            .extendedDynamicState)
+        continue;
 
       std::cout << "selected " << device.getProperties().deviceName <<
         std::endl;
@@ -234,31 +244,14 @@ private:
     throw std::runtime_error("found no suitable vulkan device :(");
   }
 
-  struct QueueIndices {
-    uint32_t graphicsIndex;
-    uint32_t presentationIndex;
-  };
-
-  std::optional<QueueIndices> findQueueFamilies(
+  std::optional<uint32_t> findQueueFamilies(
     vk::raii::PhysicalDevice device
   ) {
     auto queueFamilies = device.getQueueFamilyProperties();
-    auto graphicsQfp = std::find_if(queueFamilies.begin(), queueFamilies.end(),
-      [](vk::QueueFamilyProperties const &qfp) {
-        return (qfp.queueFlags & vk::QueueFlagBits::eGraphics);
-      });
-
-    if (graphicsQfp == queueFamilies.end())
-      return std::nullopt;
-    uint32_t graphicsIndex = static_cast<uint32_t>(
-      std::distance(queueFamilies.begin(), graphicsQfp));
-
     for (uint32_t i = 0; i < queueFamilies.size(); i++) {
-      if (device.getSurfaceSupportKHR(i, surface))
-        return QueueIndices {
-          .graphicsIndex = graphicsIndex,
-          .presentationIndex = i
-        };
+      if (device.getSurfaceSupportKHR(i, surface) &&
+        (queueFamilies[i].queueFlags & vk::QueueFlagBits::eGraphics))
+        return i;
     }
 
     return std::nullopt;
@@ -266,10 +259,10 @@ private:
 
   void createLogicalDevice() {
     auto qfp = physicalDevice.getQueueFamilyProperties();
-    auto indices = findQueueFamilies(physicalDevice).value();
+    queueIndex = findQueueFamilies(physicalDevice).value();
     float queuePriority = 1;
     vk::DeviceQueueCreateInfo queueCreateInfo {
-      .queueFamilyIndex = indices.graphicsIndex,
+      .queueFamilyIndex = queueIndex,
       .queueCount = 1,
       .pQueuePriorities = &queuePriority
     };
@@ -279,31 +272,21 @@ private:
       vk::PhysicalDeviceVulkan11Features,
       vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT> features {
       { },
-      { .dynamicRendering = true },
+      { .synchronization2 = true, .dynamicRendering = true },
       { .shaderDrawParameters = true },
       { .extendedDynamicState = true }
-    };
-
-    std::vector<const char *> deviceExts {
-      vk::KHRSwapchainExtensionName,
-      vk::KHRSpirv14ExtensionName,
-      vk::KHRSynchronization2ExtensionName,
-      vk::KHRCreateRenderpass2ExtensionName
     };
 
     vk::DeviceCreateInfo deviceCreateInfo {
       .pNext = features.get<vk::PhysicalDeviceFeatures2>(),
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queueCreateInfo,
-      .enabledExtensionCount = static_cast<uint32_t>(deviceExts.size()),
-      .ppEnabledExtensionNames = deviceExts.data()
+      .enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size()),
+      .ppEnabledExtensionNames = deviceExtensions.data()
     };
 
     device = vk::raii::Device(physicalDevice, deviceCreateInfo);
-    graphicsQueue = vk::raii::Queue(device, indices.graphicsIndex, 0);
-    presentQueue = vk::raii::Queue(device, indices.presentationIndex, 0);
-    graphicsFamily = indices.graphicsIndex;
-    presentFamily = indices.presentationIndex;
+    queue = vk::raii::Queue(device, queueIndex, 0);
   }
 
   void createSwapChain() {
@@ -328,22 +311,14 @@ private:
       .imageArrayLayers = 1,
       .imageUsage = vk::ImageUsageFlagBits::eColorAttachment,
       .imageSharingMode = vk::SharingMode::eExclusive,
-      .queueFamilyIndexCount = 0,
-      .pQueueFamilyIndices = nullptr,
+      .queueFamilyIndexCount = 1,
+      .pQueueFamilyIndices = &queueIndex,
       .preTransform = caps.currentTransform,
       .compositeAlpha = vk::CompositeAlphaFlagBitsKHR::eOpaque,
       .presentMode = mode,
       .clipped = vk::True,
       .oldSwapchain = nullptr
     };
-
-    uint32_t queueFamilies[] = {graphicsFamily, presentFamily};
-
-    if (graphicsFamily != presentFamily) {
-      createInfo.imageSharingMode = vk::SharingMode::eConcurrent;
-      createInfo.queueFamilyIndexCount = 2;
-      createInfo.pQueueFamilyIndices = queueFamilies;
-    }
 
     swapchain = vk::raii::SwapchainKHR(device, createInfo);
     swapchainImages = swapchain.getImages();
@@ -516,7 +491,7 @@ private:
   void createCommandPool() {
     vk::CommandPoolCreateInfo poolInfo {
       .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
-      .queueFamilyIndex = graphicsFamily
+      .queueFamilyIndex = queueIndex
     };
 
     commandPool = vk::raii::CommandPool(device, poolInfo);
@@ -551,11 +526,13 @@ private:
   }
 
   void drawFrame() {
-    auto [result, imageIndex] =
-      swapchain.acquireNextImage(UINT64_MAX, presentComplete, nullptr);
-    recordCommandBuffer(imageIndex);
-    device.resetFences(*drawFence);
+    queue.waitIdle();
 
+    auto [result, imageIndex] =
+      swapchain.acquireNextImage(UINT64_MAX, *presentComplete, nullptr);
+    recordCommandBuffer(imageIndex);
+
+    device.resetFences(*drawFence);
     vk::PipelineStageFlags waitDstStageMask{
       vk::PipelineStageFlagBits::eColorAttachmentOutput
     };
@@ -564,13 +541,13 @@ private:
       .waitSemaphoreCount = 1,
       .pWaitSemaphores = &*presentComplete,
       .pWaitDstStageMask = &waitDstStageMask,
+      .commandBufferCount = 1,
       .pCommandBuffers = &*commandBuffer,
       .signalSemaphoreCount = 1,
       .pSignalSemaphores = &*renderFinished
     };
 
-    graphicsQueue.submit(submitInfo, drawFence);
-
+		queue.submit(submitInfo, drawFence);
     while (vk::Result::eTimeout == device.waitForFences(
       *drawFence, true, UINT64_MAX));
 
@@ -582,7 +559,16 @@ private:
       .pImageIndices = &imageIndex
     };
 
-    result = presentQueue.presentKHR(presentInfo);
+    result = queue.presentKHR(presentInfo);
+    switch (result) {
+			case vk::Result::eSuccess:
+				break;
+			case vk::Result::eSuboptimalKHR:
+				std::cout << "esuboptimalkhr returned" << std::endl;
+				break;
+			default:
+				break;
+		}
   }
 
   void recordCommandBuffer(uint32_t imageIndex) {
@@ -616,8 +602,20 @@ private:
       .pColorAttachments = &attachmentInfo
     };
 
+    vk::Viewport viewport {
+      .x =  0.0f,
+      .y = 0.0f,
+      .width = static_cast<float>(swapchainExtent.width),
+      .height = static_cast<float>(swapchainExtent.height),
+      .minDepth = 0.0f,
+      .maxDepth = 1.0f
+    };
+
     commandBuffer.beginRendering(renderingInfo);
-    commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+    commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
+		commandBuffer.setViewport(0, viewport);
+		commandBuffer.setScissor(0,
+      vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
     commandBuffer.draw(3, 1, 0, 0);
     commandBuffer.endRendering();
 

@@ -25,5 +25,5 @@ VertexOutput vert_main(uint vid: SV_VertexID) {
 
 [shader("fragment")]
 float4 frag_main(VertexOutput vert) : SV_Target {
-  return float4(vert.color, 0.0);
+  return float4(vert.color, 1.0);
 }
