@@ -4,11 +4,43 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#include <glm/glm.hpp>
+
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 
 #include "shaders.h"
+
+struct Vertex {
+  glm::vec2 pos;
+  glm::vec3 color;
+
+  static vk::VertexInputBindingDescription getBindingDesc() {
+    return {
+      .binding = 0,
+      .stride = sizeof(Vertex),
+      .inputRate = vk::VertexInputRate::eVertex,
+    };
+  }
+
+  static std::array<vk::VertexInputAttributeDescription, 2> getAttrsDescs() {
+    return {
+      vk::VertexInputAttributeDescription {
+        .location = 0,
+        .binding = 0,
+        .format = vk::Format::eR32G32Sfloat,
+        .offset = offsetof(Vertex, pos)
+      },
+      vk::VertexInputAttributeDescription {
+        .location = 1,
+        .binding = 0,
+        .format = vk::Format::eR32G32B32Sfloat,
+        .offset = offsetof(Vertex, color)
+      },
+    };
+  }
+};
 
 class App {
 public:
@@ -84,6 +116,10 @@ private:
   // the actual graphics pipeline
   vk::raii::Pipeline pipeline = nullptr;
 
+  // the vertex buffer we will be render
+  vk::raii::Buffer vertexBuffer = nullptr;
+  // the actual memory for the vertex buffer
+  vk::raii::DeviceMemory vertexBufferMem = nullptr;
   // the collection of command buffers for our queue
   vk::raii::CommandPool commandPool = nullptr;
   // one per frame in flight, the buffer to which we submit commands to the gpu
@@ -103,6 +139,13 @@ private:
   // submitted
   std::vector<vk::raii::Fence> drawFences;
 
+  // triangle that we wanna render
+  const std::vector<Vertex> vertices = {
+    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+  };
+
   void initWindow() {
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -120,6 +163,7 @@ private:
     createSwapchain();
     createImageViews();
     createGraphicsPipeline();
+    createVertexBuffer();
     createCommandPool();
     createCommandBuffers();
     createSyncObjects();
@@ -492,8 +536,15 @@ private:
       vertShaderInfo, fragShaderInfo
     };
 
-    // TODO: vertex buffers
-    vk::PipelineVertexInputStateCreateInfo vertexInputInfo{};
+    // describe vertex buffers
+    auto bindingDesc = Vertex::getBindingDesc();
+    auto attrDesc = Vertex::getAttrsDescs();
+    vk::PipelineVertexInputStateCreateInfo vertexInputInfo {
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &bindingDesc,
+      .vertexAttributeDescriptionCount = attrDesc.size(),
+      .pVertexAttributeDescriptions = attrDesc.data()
+    };
 
     // we want our viewport and scissor to be able to dynamically change so we
     // can resize the window (scissor is basically what portion of the viewport
@@ -596,6 +647,52 @@ private:
     };
 
     return vk::raii::ShaderModule(device, createInfo);
+  }
+
+  void createVertexBuffer() {
+    // create buffer
+    vk::BufferCreateInfo bufferInfo {
+      .size = sizeof(vertices[0]) * vertices.size(),
+      .usage = vk::BufferUsageFlagBits::eVertexBuffer,
+      .sharingMode = vk::SharingMode::eExclusive
+    };
+
+    vertexBuffer = vk::raii::Buffer(device, bufferInfo);
+
+    // allocate buffer in memory
+    vk::MemoryRequirements reqs = vertexBuffer.getMemoryRequirements();
+    uint32_t memIndex = findMemoryType(reqs.memoryTypeBits,
+      vk::MemoryPropertyFlagBits::eHostVisible |
+      vk::MemoryPropertyFlagBits::eHostCoherent);
+    vk::MemoryAllocateInfo allocInfo {
+      .allocationSize = reqs.size,
+      .memoryTypeIndex = memIndex
+    };
+
+    vertexBufferMem = vk::raii::DeviceMemory(device, allocInfo);
+
+    // bind the memory we just allocated to the buffer
+    vertexBuffer.bindMemory(vertexBufferMem, 0);
+
+    // write our triangle to memory
+    void *data = vertexBufferMem.mapMemory(0, bufferInfo.size);
+    memcpy(data, vertices.data(), bufferInfo.size);
+    vertexBufferMem.unmapMemory();
+  }
+
+  uint32_t findMemoryType(
+    uint32_t typeFilter,
+    vk::MemoryPropertyFlags propFilter
+  ) {
+    auto props = physicalDevice.getMemoryProperties();
+
+    for (uint32_t i = 0; i < props.memoryTypeCount; i++) {
+      if ((typeFilter & (1 << i)) &&
+        (props.memoryTypes[i].propertyFlags & propFilter) == propFilter)
+        return i;
+    }
+
+    throw std::runtime_error("could not find suitable device memory");
   }
 
   void createCommandPool() {
@@ -770,7 +867,8 @@ private:
 
     // yippee yippee yay yay rendering!
     commandBuffer.beginRendering(renderingInfo);
-    commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
+    commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+    commandBuffer.bindVertexBuffers(0, *vertexBuffer, {0});
     commandBuffer.setViewport(0, viewport);
     commandBuffer.setScissor(0,
       vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
