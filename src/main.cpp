@@ -214,7 +214,7 @@ private:
       .apiVersion = vk::ApiVersion14,
     };
 
-    vk::InstanceCreateInfo createInfo {
+    vk::InstanceCreateInfo instanceInfo {
       .pApplicationInfo = &appInfo,
       .enabledLayerCount = static_cast<uint32_t>(requiredLayers.size()),
       .ppEnabledLayerNames = requiredLayers.data(),
@@ -222,7 +222,7 @@ private:
       .ppEnabledExtensionNames = requiredExts.data(),
     };
 
-    instance = vk::raii::Instance(context, createInfo);
+    instance = vk::raii::Instance(context, instanceInfo);
 
     // list extensions
     std::cout << "available extensions:" << std::endl;
@@ -430,7 +430,7 @@ private:
       imageCount = caps.maxImageCount;
 
     // create swap chain
-    vk::SwapchainCreateInfoKHR createInfo {
+    vk::SwapchainCreateInfoKHR swapchainInfo {
       .flags = vk::SwapchainCreateFlagsKHR(),
       .surface = surface,
       .minImageCount = imageCount,
@@ -449,7 +449,7 @@ private:
       .oldSwapchain = nullptr
     };
 
-    swapchain = vk::raii::SwapchainKHR(device, createInfo);
+    swapchain = vk::raii::SwapchainKHR(device, swapchainInfo);
 
     // we also want info about the swapchain images so we can create image
     // views and correctly render to the images
@@ -506,7 +506,7 @@ private:
 
   void createImageViews() {
     // each image is to be treated as a single 2d image
-    vk::ImageViewCreateInfo createInfo {
+    vk::ImageViewCreateInfo imageViewInfo {
       .viewType = vk::ImageViewType::e2D,
       .format = swapchainFormat,
       .subresourceRange = {
@@ -519,8 +519,8 @@ private:
     };
 
     for (auto image : swapchainImages) {
-      createInfo.image = image;
-      swapchainImageViews.emplace_back(device, createInfo);
+      imageViewInfo.image = image;
+      swapchainImageViews.emplace_back(device, imageViewInfo);
     }
   }
 
@@ -648,12 +648,12 @@ private:
   vk::raii::ShaderModule createShaderModule() {
     // our makefile compiles our shaders into a c++ file so we can just use
     // that for our shader module
-    vk::ShaderModuleCreateInfo createInfo {
+    vk::ShaderModuleCreateInfo shaderInfo {
       .codeSize = shaders_len,
       .pCode = (const uint32_t *) &shaders,
     };
 
-    return vk::raii::ShaderModule(device, createInfo);
+    return vk::raii::ShaderModule(device, shaderInfo);
   }
 
   void createVertexBuffer() {
