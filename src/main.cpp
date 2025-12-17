@@ -23,6 +23,7 @@ private:
   GLFWwindow *window;
   static constexpr uint32_t WIDTH = 800;
   static constexpr uint32_t HEIGHT = 600;
+  static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 
   const std::vector<const char *> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
@@ -47,6 +48,7 @@ private:
   vk::Format swapchainFormat = vk::Format::eUndefined;
   vk::Extent2D swapchainExtent;
   std::vector<vk::raii::ImageView> swapchainImageViews;
+  uint32_t frameIndex = 0;
 
   vk::raii::Context context;
   vk::raii::Instance instance = nullptr;
@@ -59,10 +61,11 @@ private:
   vk::raii::PipelineLayout pipelineLayout = nullptr;
   vk::raii::Pipeline pipeline = nullptr;
   vk::raii::CommandPool commandPool = nullptr;
-  vk::raii::CommandBuffer commandBuffer = nullptr;
-  vk::raii::Semaphore presentComplete = nullptr;
-  vk::raii::Semaphore renderFinished = nullptr;
-  vk::raii::Fence drawFence = nullptr;
+
+  std::vector<vk::raii::CommandBuffer> commandBuffers;
+  std::vector<vk::raii::Semaphore> presentCompletes;
+  std::vector<vk::raii::Semaphore> renderFinisheds;
+  std::vector<vk::raii::Fence> drawFences;
 
   void initWindow() {
     glfwInit();
@@ -81,7 +84,7 @@ private:
     createImageViews();
     createGraphicsPipeline();
     createCommandPool();
-    createCommandBuffer();
+    createCommandBuffers();
     createSyncObjects();
   }
 
@@ -497,23 +500,27 @@ private:
     commandPool = vk::raii::CommandPool(device, poolInfo);
   }
 
-  void createCommandBuffer() {
+  void createCommandBuffers() {
     vk::CommandBufferAllocateInfo allocInfo {
       .commandPool = commandPool,
       .level = vk::CommandBufferLevel::ePrimary,
-      .commandBufferCount = 1
+      .commandBufferCount = MAX_FRAMES_IN_FLIGHT
     };
 
-    commandBuffer = std::move(vk::raii::CommandBuffers(device, allocInfo)
-      .front());
+    commandBuffers = vk::raii::CommandBuffers(device, allocInfo);
   }
 
   void createSyncObjects() {
-    presentComplete = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo {});
-    renderFinished = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo {});
-    drawFence = vk::raii::Fence(device, {
-      .flags = vk::FenceCreateFlagBits::eSignaled
-    });
+    for (int i = 0; i < swapchainImages.size(); i++) {
+      renderFinisheds.emplace_back(device, vk::SemaphoreCreateInfo {});
+    }
+
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+      presentCompletes.emplace_back(device, vk::SemaphoreCreateInfo {});
+      drawFences.emplace_back(device, vk::FenceCreateInfo {
+        .flags = vk::FenceCreateFlagBits::eSignaled
+      });
+    }
   }
 
   void mainLoop() {
@@ -526,34 +533,35 @@ private:
   }
 
   void drawFrame() {
-    queue.waitIdle();
+    while (vk::Result::eTimeout == device.waitForFences(
+      *drawFences[frameIndex], true, UINT64_MAX));
+    device.resetFences(*drawFences[frameIndex]);
 
-    auto [result, imageIndex] =
-      swapchain.acquireNextImage(UINT64_MAX, *presentComplete, nullptr);
+    auto [result, imageIndex] = swapchain.acquireNextImage(
+      UINT64_MAX, *presentCompletes[frameIndex], nullptr);
+
+    commandBuffers[frameIndex].reset();
     recordCommandBuffer(imageIndex);
 
-    device.resetFences(*drawFence);
     vk::PipelineStageFlags waitDstStageMask{
       vk::PipelineStageFlagBits::eColorAttachmentOutput
     };
 
     vk::SubmitInfo submitInfo {
       .waitSemaphoreCount = 1,
-      .pWaitSemaphores = &*presentComplete,
+      .pWaitSemaphores = &*presentCompletes[frameIndex],
       .pWaitDstStageMask = &waitDstStageMask,
       .commandBufferCount = 1,
-      .pCommandBuffers = &*commandBuffer,
+      .pCommandBuffers = &*commandBuffers[frameIndex],
       .signalSemaphoreCount = 1,
-      .pSignalSemaphores = &*renderFinished
+      .pSignalSemaphores = &*renderFinisheds[imageIndex]
     };
 
-		queue.submit(submitInfo, drawFence);
-    while (vk::Result::eTimeout == device.waitForFences(
-      *drawFence, true, UINT64_MAX));
+		queue.submit(submitInfo, drawFences[frameIndex]);
 
     vk::PresentInfoKHR presentInfo {
       .waitSemaphoreCount = 1,
-      .pWaitSemaphores = &*renderFinished,
+      .pWaitSemaphores = &*renderFinisheds[imageIndex],
       .swapchainCount = 1,
       .pSwapchains = &*swapchain,
       .pImageIndices = &imageIndex
@@ -569,9 +577,12 @@ private:
 			default:
 				break;
 		}
+
+		frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
   }
 
   void recordCommandBuffer(uint32_t imageIndex) {
+    auto &commandBuffer = commandBuffers[frameIndex];
     commandBuffer.begin({});
     transitionImageLayout(
       imageIndex,
@@ -666,7 +677,7 @@ private:
       .pImageMemoryBarriers = &barrier
     };
 
-    commandBuffer.pipelineBarrier2(dependencyInfo);
+    commandBuffers[frameIndex].pipelineBarrier2(dependencyInfo);
   }
 
   void cleanup() {
