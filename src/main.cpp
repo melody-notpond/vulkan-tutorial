@@ -49,6 +49,7 @@ private:
   vk::Extent2D swapchainExtent;
   std::vector<vk::raii::ImageView> swapchainImageViews;
   uint32_t frameIndex = 0;
+  bool frameResized = false;
 
   vk::raii::Context context;
   vk::raii::Instance instance = nullptr;
@@ -70,8 +71,9 @@ private:
   void initWindow() {
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
     window = glfwCreateWindow(WIDTH, HEIGHT, "vulkan yay", nullptr, nullptr);
+    glfwSetWindowUserPointer(window, this);
+    glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
   }
 
   void initVulkan() {
@@ -80,7 +82,7 @@ private:
     createSurface();
     pickPhysicalDevice();
     createLogicalDevice();
-    createSwapChain();
+    createSwapchain();
     createImageViews();
     createGraphicsPipeline();
     createCommandPool();
@@ -200,6 +202,15 @@ private:
     surface = vk::raii::SurfaceKHR(instance, _surface);
   }
 
+  static void framebufferResizeCallback(
+    GLFWwindow *window,
+    int width,
+    int height
+  ) {
+    auto *app = reinterpret_cast<App *>(glfwGetWindowUserPointer(window));
+    app->frameResized = true;
+  }
+
   void pickPhysicalDevice() {
     auto devices = instance.enumeratePhysicalDevices();
     if (devices.empty()) {
@@ -292,7 +303,7 @@ private:
     queue = vk::raii::Queue(device, queueIndex, 0);
   }
 
-  void createSwapChain() {
+  void createSwapchain() {
     auto caps = physicalDevice.getSurfaceCapabilitiesKHR(surface);
     auto availableFormats = physicalDevice.getSurfaceFormatsKHR(surface);
     auto format = chooseSurfaceFormat(availableFormats);
@@ -535,11 +546,18 @@ private:
   void drawFrame() {
     while (vk::Result::eTimeout == device.waitForFences(
       *drawFences[frameIndex], true, UINT64_MAX));
-    device.resetFences(*drawFences[frameIndex]);
 
     auto [result, imageIndex] = swapchain.acquireNextImage(
       UINT64_MAX, *presentCompletes[frameIndex], nullptr);
 
+    if (result == vk::Result::eErrorOutOfDateKHR) {
+      recreateSwapchain();
+      return;
+    } else if (result != vk::Result::eSuccess &&
+        result != vk::Result::eSuboptimalKHR)
+      throw std::runtime_error("failed to acquire swapchain!");
+
+    device.resetFences(*drawFences[frameIndex]);
     commandBuffers[frameIndex].reset();
     recordCommandBuffer(imageIndex);
 
@@ -557,28 +575,32 @@ private:
       .pSignalSemaphores = &*renderFinisheds[imageIndex]
     };
 
-		queue.submit(submitInfo, drawFences[frameIndex]);
+    queue.submit(submitInfo, drawFences[frameIndex]);
 
-    vk::PresentInfoKHR presentInfo {
-      .waitSemaphoreCount = 1,
-      .pWaitSemaphores = &*renderFinisheds[imageIndex],
-      .swapchainCount = 1,
-      .pSwapchains = &*swapchain,
-      .pImageIndices = &imageIndex
-    };
+    try {
+      vk::PresentInfoKHR presentInfo {
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &*renderFinisheds[imageIndex],
+        .swapchainCount = 1,
+        .pSwapchains = &*swapchain,
+        .pImageIndices = &imageIndex
+      };
 
-    result = queue.presentKHR(presentInfo);
-    switch (result) {
-			case vk::Result::eSuccess:
-				break;
-			case vk::Result::eSuboptimalKHR:
-				std::cout << "esuboptimalkhr returned" << std::endl;
-				break;
-			default:
-				break;
-		}
+      result = queue.presentKHR(presentInfo);
+      if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR || frameResized) {
+        frameResized = false;
+        recreateSwapchain();
+      } else if (result != vk::Result::eSuccess)
+         throw std::runtime_error("could not present to swapchain image");
+    } catch (const vk::SystemError &e) {
+      if (e.code().value() == static_cast<int>(vk::Result::eErrorOutOfDateKHR))
+      {
+        recreateSwapchain();
+        return;
+      } else throw;
+    }
 
-		frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
+    frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
   }
 
   void recordCommandBuffer(uint32_t imageIndex) {
@@ -624,8 +646,8 @@ private:
 
     commandBuffer.beginRendering(renderingInfo);
     commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
-		commandBuffer.setViewport(0, viewport);
-		commandBuffer.setScissor(0,
+    commandBuffer.setViewport(0, viewport);
+    commandBuffer.setScissor(0,
       vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
     commandBuffer.draw(3, 1, 0, 0);
     commandBuffer.endRendering();
@@ -680,7 +702,29 @@ private:
     commandBuffers[frameIndex].pipelineBarrier2(dependencyInfo);
   }
 
+  void recreateSwapchain() {
+    int width, height;
+    glfwGetFramebufferSize(window, &width, &height);
+    while (width == 0 || height == 0) {
+      glfwWaitEvents();
+      glfwGetFramebufferSize(window, &width, &height);
+    }
+
+    device.waitIdle();
+
+    cleanupSwapchain();
+    createSwapchain();
+    createImageViews();
+  }
+
+  void cleanupSwapchain() {
+    swapchainImageViews.clear();
+    swapchain = nullptr;
+  }
+
   void cleanup() {
+    cleanupSwapchain();
+    surface = nullptr;
     glfwDestroyWindow(window);
     glfwTerminate();
   }
