@@ -120,6 +120,10 @@ private:
   vk::raii::Buffer vertexBuffer = nullptr;
   // the actual memory for the vertex buffer
   vk::raii::DeviceMemory vertexBufferMem = nullptr;
+  // the index buffer we will be render
+  vk::raii::Buffer indexBuffer = nullptr;
+  // the actual memory for the index buffer
+  vk::raii::DeviceMemory indexBufferMem = nullptr;
   // the collection of command buffers for our queue
   vk::raii::CommandPool commandPool = nullptr;
   // one per frame in flight, the buffer to which we submit commands to the gpu
@@ -139,12 +143,14 @@ private:
   // submitted
   std::vector<vk::raii::Fence> drawFences;
 
-  // triangle that we wanna render
+  // rectangle that we wanna render
   const std::vector<Vertex> vertices = {
-    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
   };
+  const std::vector<uint16_t> indices = {0, 1, 2, 2, 3, 0};
 
   void initWindow() {
     glfwInit();
@@ -165,6 +171,7 @@ private:
     createGraphicsPipeline();
     createCommandPool();
     createVertexBuffer();
+    createIndexBuffer();
     createCommandBuffers();
     createSyncObjects();
   }
@@ -650,28 +657,44 @@ private:
   }
 
   void createVertexBuffer() {
-    // create vertex buffer
-    vk::DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
-    createBuffer(vertexBuffer, vertexBufferMem, bufferSize,
-      vk::BufferUsageFlagBits::eVertexBuffer |
-      vk::BufferUsageFlagBits::eTransferDst,
+    vk::DeviceSize size = sizeof(vertices[0]) * vertices.size();
+    stageBuffers(vertexBuffer, vertexBufferMem,
+      vk::BufferUsageFlagBits::eVertexBuffer, vertices.data(), size);
+  }
+
+  void createIndexBuffer() {
+    vk::DeviceSize size = sizeof(indices[0]) * indices.size();
+    stageBuffers(indexBuffer, indexBufferMem,
+      vk::BufferUsageFlagBits::eIndexBuffer, indices.data(), size);
+  }
+
+  void stageBuffers(
+    vk::raii::Buffer &buffer,
+    vk::raii::DeviceMemory &mem,
+    vk::BufferUsageFlags usage,
+    const void *data,
+    vk::DeviceSize size
+  ) {
+    // create buffer
+    createBuffer(buffer, mem, size,
+      usage | vk::BufferUsageFlagBits::eTransferDst,
       vk::MemoryPropertyFlagBits::eDeviceLocal);
 
     // create staging buffer
     vk::raii::Buffer stagingBuffer = nullptr;
     vk::raii::DeviceMemory stagingBufferMem = nullptr;
-    createBuffer(stagingBuffer, stagingBufferMem, bufferSize,
+    createBuffer(stagingBuffer, stagingBufferMem, size,
       vk::BufferUsageFlagBits::eTransferSrc,
       vk::MemoryPropertyFlagBits::eHostVisible |
       vk::MemoryPropertyFlagBits::eHostCoherent);
 
-    // write our triangle to staging buffer
-    void *data = stagingBufferMem.mapMemory(0, bufferSize);
-    memcpy(data, vertices.data(), bufferSize);
+    // write our data to staging buffer
+    void *ptr = stagingBufferMem.mapMemory(0, size);
+    memcpy(ptr, data, size);
     stagingBufferMem.unmapMemory();
 
-    // copy staging buffer to vertex buffer
-    copyBuffer(vertexBuffer, stagingBuffer, bufferSize);
+    // copy staging buffer to buffer
+    copyBuffer(buffer, stagingBuffer, size);
   }
 
   void createBuffer(
@@ -920,10 +943,11 @@ private:
     commandBuffer.beginRendering(renderingInfo);
     commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
     commandBuffer.bindVertexBuffers(0, *vertexBuffer, {0});
+    commandBuffer.bindIndexBuffer(indexBuffer, 0, vk::IndexType::eUint16);
     commandBuffer.setViewport(0, viewport);
     commandBuffer.setScissor(0,
       vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
-    commandBuffer.draw(3, 1, 0, 0);
+    commandBuffer.drawIndexed(indices.size(), 1, 0, 0, 0);
     commandBuffer.endRendering();
 
     // now we want the image buffer to be ready to present
