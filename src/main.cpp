@@ -21,8 +21,14 @@ public:
 
 private:
   GLFWwindow *window;
+  bool frameResized = false;
+
   static constexpr uint32_t WIDTH = 800;
   static constexpr uint32_t HEIGHT = 600;
+
+  // frames in flight basically give an extra frame for the cpu to work on so
+  // the cpu do other work while the gpu renders instead of waiting for the gpu
+  // to finish first
   static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 
   const std::vector<const char *> validationLayers = {
@@ -42,30 +48,59 @@ private:
   static constexpr bool enableValidationLayers = true;
   #endif
 
+  // info about what capabilities vulkan has on this system
+  vk::raii::Context context;
+  // provides available physical devices and surfaces
+  vk::raii::Instance instance = nullptr;
+  // allows debug messages from validation layers
+  vk::raii::DebugUtilsMessengerEXT debugMessenger = nullptr;
+  // the window surface to draw on
+  vk::raii::SurfaceKHR surface = nullptr;
+
+  // represents the physical gpu
+  vk::raii::PhysicalDevice physicalDevice = nullptr;
+  // an abstraction of a gpu
+  vk::raii::Device device = nullptr;
+  // a queue of commands and data to submit to the gpu
+  vk::raii::Queue queue = nullptr;
   uint32_t queueIndex;
 
-  std::vector<vk::Image> swapchainImages;
-  vk::Format swapchainFormat = vk::Format::eUndefined;
-  vk::Extent2D swapchainExtent;
-  std::vector<vk::raii::ImageView> swapchainImageViews;
-  uint32_t frameIndex = 0;
-  bool frameResized = false;
-
-  vk::raii::Context context;
-  vk::raii::Instance instance = nullptr;
-  vk::raii::DebugUtilsMessengerEXT debugMessenger = nullptr;
-  vk::raii::SurfaceKHR surface = nullptr;
-  vk::raii::PhysicalDevice physicalDevice = nullptr;
-  vk::raii::Device device = nullptr;
-  vk::raii::Queue queue = nullptr;
+  // the queue of buffers the gpu renders to before presenting
   vk::raii::SwapchainKHR swapchain = nullptr;
-  vk::raii::PipelineLayout pipelineLayout = nullptr;
-  vk::raii::Pipeline pipeline = nullptr;
-  vk::raii::CommandPool commandPool = nullptr;
 
+  // the image buffers in the swapchain
+  std::vector<vk::Image> swapchainImages;
+  // how each image buffer should be interpreted as
+  std::vector<vk::raii::ImageView> swapchainImageViews;
+  // the format of the image buffers
+  vk::Format swapchainFormat = vk::Format::eUndefined;
+  // the size of the image buffers
+  vk::Extent2D swapchainExtent;
+  // which frame in flight we are rendering
+  uint32_t frameIndex = 0;
+
+  // lists the variables the cpu can set in the shaders
+  vk::raii::PipelineLayout pipelineLayout = nullptr;
+  // the actual graphics pipeline
+  vk::raii::Pipeline pipeline = nullptr;
+
+  // the collection of command buffers for our queue
+  vk::raii::CommandPool commandPool = nullptr;
+  // one per frame in flight, the buffer to which we submit commands to the gpu
   std::vector<vk::raii::CommandBuffer> commandBuffers;
-  std::vector<vk::raii::Semaphore> presentCompletes;
+
+  // vulkan makes a distinction between rendering and presenting, so we need to
+  // sync rendering and presenting to make sure there arent any funny
+  // synchronisation errors
+
+  // one per image view, blocks gpu until rendering is done
   std::vector<vk::raii::Semaphore> renderFinisheds;
+
+  // one per frame in flight, blocks gpu until the buffer is presented
+  std::vector<vk::raii::Semaphore> presentCompletes;
+
+  // one per frame in flight, blocks cpu until a new draw command can be
+  // submitted
   std::vector<vk::raii::Fence> drawFences;
 
   void initWindow() {
@@ -91,14 +126,6 @@ private:
   }
 
   void createInstance() {
-    constexpr vk::ApplicationInfo appInfo {
-      .pApplicationName = "hewo wowd",
-      .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
-      .pEngineName = "No Engine",
-      .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-      .apiVersion = vk::ApiVersion14,
-    };
-
     // get required layers
     std::vector<const char *> requiredLayers;
     if (enableValidationLayers)
@@ -127,6 +154,15 @@ private:
       throw std::runtime_error("some required extensions are unsupported");
     }
 
+    // create instance
+    constexpr vk::ApplicationInfo appInfo {
+      .pApplicationName = "vulkan yay",
+      .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+      .pEngineName = "No Engine",
+      .engineVersion = VK_MAKE_VERSION(1, 0, 0),
+      .apiVersion = vk::ApiVersion14,
+    };
+
     vk::InstanceCreateInfo createInfo {
       .pApplicationInfo = &appInfo,
       .enabledLayerCount = static_cast<uint32_t>(requiredLayers.size()),
@@ -135,8 +171,9 @@ private:
       .ppEnabledExtensionNames = requiredExts.data(),
     };
 
-    // list extensions
     instance = vk::raii::Instance(context, createInfo);
+
+    // list extensions
     std::cout << "available extensions:" << std::endl;
     for (const auto& extension : extProps) {
         std::cout << '\t' << extension.extensionName << '\n';
@@ -144,13 +181,16 @@ private:
   }
 
   std::vector<const char *> getRequiredExtensions() {
+    // glfw requires certain extensions so we obtain those
     uint32_t extCount = 0;
     auto glfwExts = glfwGetRequiredInstanceExtensions(&extCount);
-
     std::vector extensions(glfwExts, glfwExts + extCount);
+
+    // debug extension is required if we want validation layers
     if (enableValidationLayers)
       extensions.push_back(vk::EXTDebugUtilsExtensionName);
 
+    // print out required extensions
     std::cout << "required extensions:" << std::endl;
     for (const auto& extension : extensions) {
         std::cout << '\t' << extension << '\n';
@@ -162,6 +202,7 @@ private:
   void setupDebugMessenger() {
     if (!enableValidationLayers)
       return;
+
     vk::DebugUtilsMessageSeverityFlagsEXT severityFlags(
       // vk::DebugUtilsMessageSeverityFlagBitsEXT::eInfo    |
       vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose |
@@ -188,6 +229,7 @@ private:
     const vk::DebugUtilsMessengerCallbackDataEXT *pCallbackData,
     void *pUserData
   ) {
+    // just print the validation layer's debug message
     std::cerr << "validation layer: type " << to_string(type) << " msg: " <<
       pCallbackData->pMessage << std::endl;
     return vk::False;
@@ -207,6 +249,7 @@ private:
     int width,
     int height
   ) {
+    // some devices dont issue outofdate errors on window resize
     auto *app = reinterpret_cast<App *>(glfwGetWindowUserPointer(window));
     app->frameResized = true;
   }
@@ -217,20 +260,28 @@ private:
       throw std::runtime_error("no vulkan compatible devices found! :(");
     }
 
+    // print available devices
     std::cout << "available devices:" << std::endl;
     for (const auto &device : devices) {
       std::cout << '\t' << device.getProperties().deviceName << std::endl;
     }
 
+    // we want a device that:
+    // - supports vulkan api 1.3+
+    // - supports a queue family with graphics and present capabilities
+    // - has the features we require to draw
     for (const auto &device : devices) {
+      // check vulkan api
       if (device.getProperties().apiVersion < VK_API_VERSION_1_3)
         continu: continue;
 
+      // check queue families
       auto queueFamilies = device.getQueueFamilyProperties();
       auto indices = findQueueFamilies(device);
       if (!indices)
         continue;
 
+      // check extensions
       auto extensions = device.enumerateDeviceExtensionProperties();
       for (auto const &ext : deviceExtensions) {
         if (std::ranges::none_of(extensions, [&](auto const &deviceExt) {
@@ -238,6 +289,7 @@ private:
         })) goto continu;
       }
 
+      // check features
       auto features = device.getFeatures2<vk::PhysicalDeviceFeatures2,
         vk::PhysicalDeviceVulkan11Features, vk::PhysicalDeviceVulkan13Features,
         vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
@@ -245,10 +297,13 @@ private:
             .shaderDrawParameters ||
           !features.get<vk::PhysicalDeviceVulkan13Features>()
             .dynamicRendering ||
+          !features.get<vk::PhysicalDeviceVulkan13Features>()
+            .synchronization2 ||
           !features.get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>()
             .extendedDynamicState)
         continue;
 
+      // print and set selected device
       std::cout << "selected " << device.getProperties().deviceName <<
         std::endl;
       physicalDevice = device;
@@ -261,6 +316,8 @@ private:
   std::optional<uint32_t> findQueueFamilies(
     vk::raii::PhysicalDevice device
   ) {
+    // we want a queue family that can support both graphics and presenting to
+    // a window surface
     auto queueFamilies = device.getQueueFamilyProperties();
     for (uint32_t i = 0; i < queueFamilies.size(); i++) {
       if (device.getSurfaceSupportKHR(i, surface) &&
@@ -272,6 +329,7 @@ private:
   }
 
   void createLogicalDevice() {
+    // set up queue
     auto qfp = physicalDevice.getQueueFamilyProperties();
     queueIndex = findQueueFamilies(physicalDevice).value();
     float queuePriority = 1;
@@ -281,6 +339,7 @@ private:
       .pQueuePriorities = &queuePriority
     };
 
+    // set up device features
     vk::StructureChain<vk::PhysicalDeviceFeatures2,
       vk::PhysicalDeviceVulkan13Features,
       vk::PhysicalDeviceVulkan11Features,
@@ -291,6 +350,7 @@ private:
       { .extendedDynamicState = true }
     };
 
+    // create device and queue
     vk::DeviceCreateInfo deviceCreateInfo {
       .pNext = features.get<vk::PhysicalDeviceFeatures2>(),
       .queueCreateInfoCount = 1,
@@ -304,6 +364,7 @@ private:
   }
 
   void createSwapchain() {
+    // lots of picking options
     auto caps = physicalDevice.getSurfaceCapabilitiesKHR(surface);
     auto availableFormats = physicalDevice.getSurfaceFormatsKHR(surface);
     auto format = chooseSurfaceFormat(availableFormats);
@@ -311,10 +372,13 @@ private:
     auto mode = choosePresentationMode(availableModes);
     auto extent = chooseSwapExtent(caps);
 
+    // triple buffering is a nice default if supported, but go with whatever
+    // the gpu can support
     uint32_t imageCount = std::max(3u, caps.minImageCount);
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
       imageCount = caps.maxImageCount;
-    
+
+    // create swap chain
     vk::SwapchainCreateInfoKHR createInfo {
       .flags = vk::SwapchainCreateFlagsKHR(),
       .surface = surface,
@@ -335,6 +399,9 @@ private:
     };
 
     swapchain = vk::raii::SwapchainKHR(device, createInfo);
+
+    // we also want info about the swapchain images so we can create image
+    // views and correctly render to the images
     swapchainImages = swapchain.getImages();
     swapchainFormat = format.format;
     swapchainExtent = extent;
@@ -343,6 +410,7 @@ private:
   vk::SurfaceFormatKHR chooseSurfaceFormat(
     const std::vector<vk::SurfaceFormatKHR> &availableFormats
   ) {
+    // pick 32 bit bgra (srgb) if available, and pick the first option if not
     for (auto format : availableFormats) {
       if (format.format == vk::Format::eB8G8R8A8Srgb &&
         format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear)
@@ -355,6 +423,16 @@ private:
   vk::PresentModeKHR choosePresentationMode(
     const std::vector<vk::PresentModeKHR> &availableModes
   ) {
+    // pick mailbox if available, and fifo if not
+    // the options are:
+    // - immediate - present directly to the framebuffer with no intermediate
+    //   buffer (prone to tearing)
+    // - fifo - present from a queue of buffers, forcing the cpu to wait for
+    //   the next available buffer in the queue if the queue is full
+    // - fifo relaxed - like above, but if the queue is empty, present to the
+    //   framebuffer instead
+    // - mailbox - like fifo, but if the queue is full then replace the last
+    //   entry
     for (auto mode : availableModes) {
       if (mode == vk::PresentModeKHR::eMailbox)
         return mode;
@@ -364,6 +442,7 @@ private:
   }
 
   vk::Extent2D chooseSwapExtent(const vk::SurfaceCapabilitiesKHR &caps) {
+    // just get the size of the framebuffer lmao
     int width, height;
     glfwGetFramebufferSize(window, &width, &height);
     return {
@@ -375,6 +454,7 @@ private:
   }
 
   void createImageViews() {
+    // each image is to be treated as a single 2d image
     vk::ImageViewCreateInfo createInfo {
       .viewType = vk::ImageViewType::e2D,
       .format = swapchainFormat,
@@ -394,6 +474,7 @@ private:
   }
 
   void createGraphicsPipeline() {
+    // load shader module
     auto shaders = createShaderModule();
     vk::PipelineShaderStageCreateInfo vertShaderInfo {
       .stage = vk::ShaderStageFlagBits::eVertex,
@@ -411,8 +492,12 @@ private:
       vertShaderInfo, fragShaderInfo
     };
 
+    // TODO: vertex buffers
     vk::PipelineVertexInputStateCreateInfo vertexInputInfo{};
 
+    // we want our viewport and scissor to be able to dynamically change so we
+    // can resize the window (scissor is basically what portion of the viewport
+    // is visible)
     std::vector dynamicStates = {
       vk::DynamicState::eViewport,
       vk::DynamicState::eScissor
@@ -423,15 +508,17 @@ private:
       .pDynamicStates = dynamicStates.data()
     };
 
-    vk::PipelineInputAssemblyStateCreateInfo inputAssembly {
-      .topology = vk::PrimitiveTopology::eTriangleList
-    };
-
     vk::PipelineViewportStateCreateInfo viewportState {
       .viewportCount = 1,
       .scissorCount = 1
     };
 
+    // how do we want our vertices to be assembled
+    vk::PipelineInputAssemblyStateCreateInfo inputAssembly {
+      .topology = vk::PrimitiveTopology::eTriangleList,
+    };
+
+    // how do we want to rasterise our geometry
     vk::PipelineRasterizationStateCreateInfo rasteriser {
       .depthClampEnable = false,
       .rasterizerDiscardEnable = false,
@@ -443,11 +530,13 @@ private:
       .lineWidth = 1.0
     };
 
+    // how do we want to treat multisampling
     vk::PipelineMultisampleStateCreateInfo multisampling {
       .rasterizationSamples = vk::SampleCountFlagBits::e1,
       .sampleShadingEnable = false
     };
 
+    // how do we blend colours per swapchain
     vk::PipelineColorBlendAttachmentState colorBlendAttachment {
       .blendEnable = false,
       .colorWriteMask = vk::ColorComponentFlagBits::eR
@@ -456,6 +545,7 @@ private:
                       | vk::ColorComponentFlagBits::eA
     };
 
+    // how do we blend colours globally
     vk::PipelineColorBlendStateCreateInfo colorBlending {
       .logicOpEnable = false,
       .logicOp = vk::LogicOp::eCopy,
@@ -463,6 +553,7 @@ private:
       .pAttachments = &colorBlendAttachment
     };
 
+    // what uniforms and push constants we can provide to the shaders
     vk::PipelineLayoutCreateInfo pipelineLayoutInfo {
       .setLayoutCount = 0,
       .pushConstantRangeCount = 0
@@ -470,10 +561,13 @@ private:
 
     pipelineLayout = vk::raii::PipelineLayout(device, pipelineLayoutInfo);
 
+    // what swapchains do we render with
     vk::PipelineRenderingCreateInfo renderingInfo {
       .colorAttachmentCount = 1,
       .pColorAttachmentFormats = &swapchainFormat
     };
+
+    // put it all together to create the pipeline
     vk::GraphicsPipelineCreateInfo pipelineInfo {
       .pNext = &renderingInfo,
       .stageCount = 2,
@@ -494,6 +588,8 @@ private:
 
   [[nodiscard]]
   vk::raii::ShaderModule createShaderModule() {
+    // our makefile compiles our shaders into a c++ file so we can just use
+    // that for our shader module
     vk::ShaderModuleCreateInfo createInfo {
       .codeSize = shaders_len,
       .pCode = (const uint32_t *) &shaders,
@@ -512,6 +608,7 @@ private:
   }
 
   void createCommandBuffers() {
+    // we want one command buffer per frame in flight
     vk::CommandBufferAllocateInfo allocInfo {
       .commandPool = commandPool,
       .level = vk::CommandBufferLevel::ePrimary,
@@ -522,10 +619,12 @@ private:
   }
 
   void createSyncObjects() {
+    // one render semaphore per imageview
     for (int i = 0; i < swapchainImages.size(); i++) {
       renderFinisheds.emplace_back(device, vk::SemaphoreCreateInfo {});
     }
 
+    // one presentation semaphore and one draw fence per frame in flight
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
       presentCompletes.emplace_back(device, vk::SemaphoreCreateInfo {});
       drawFences.emplace_back(device, vk::FenceCreateInfo {
@@ -540,16 +639,23 @@ private:
       drawFrame();
     }
 
+    // wait for the gpu to finish all commands before exiting
     device.waitIdle();
   }
 
   void drawFrame() {
+    // the synchronisation will enforce (cpu -> render) -> presentation
+
+    // wait on the cpu for the frame in flight to be available
     while (vk::Result::eTimeout == device.waitForFences(
       *drawFences[frameIndex], true, UINT64_MAX));
 
+    // acquire the next image and signals the presentation semaphore when its
+    // ready to render to
     auto [result, imageIndex] = swapchain.acquireNextImage(
       UINT64_MAX, *presentCompletes[frameIndex], nullptr);
 
+    // check validity of swapchain
     if (result == vk::Result::eErrorOutOfDateKHR) {
       recreateSwapchain();
       return;
@@ -557,6 +663,7 @@ private:
         result != vk::Result::eSuboptimalKHR)
       throw std::runtime_error("failed to acquire swapchain!");
 
+    // reset fence for our frame in flight and draw
     device.resetFences(*drawFences[frameIndex]);
     commandBuffers[frameIndex].reset();
     recordCommandBuffer(imageIndex);
@@ -565,6 +672,11 @@ private:
       vk::PipelineStageFlagBits::eColorAttachmentOutput
     };
 
+    // - submit a command on the queue that:
+    //   - waits for the presentation semaphore
+    //   - renders to the current buffer in the swapchain
+    //   - signals the rendered semaphore
+    //   - signals the draw fence
     vk::SubmitInfo submitInfo {
       .waitSemaphoreCount = 1,
       .pWaitSemaphores = &*presentCompletes[frameIndex],
@@ -578,6 +690,9 @@ private:
     queue.submit(submitInfo, drawFences[frameIndex]);
 
     try {
+      // - submit a command on the queue that:
+      //   - waits for the rendered semaphore
+      //   - presents the current buffer in the swapchain to the framebuffer
       vk::PresentInfoKHR presentInfo {
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &*renderFinisheds[imageIndex],
@@ -587,7 +702,10 @@ private:
       };
 
       result = queue.presentKHR(presentInfo);
-      if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR || frameResized) {
+
+    // check validity of swapchain
+      if (result == vk::Result::eErrorOutOfDateKHR
+        || result == vk::Result::eSuboptimalKHR || frameResized) {
         frameResized = false;
         recreateSwapchain();
       } else if (result != vk::Result::eSuccess)
@@ -600,12 +718,15 @@ private:
       } else throw;
     }
 
+    // next frame in flight
     frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
   }
 
   void recordCommandBuffer(uint32_t imageIndex) {
     auto &commandBuffer = commandBuffers[frameIndex];
     commandBuffer.begin({});
+
+    // prepare the image buffer for rendering colour to it
     transitionImageLayout(
       imageIndex,
       vk::ImageLayout::eUndefined,
@@ -616,6 +737,7 @@ private:
       vk::PipelineStageFlagBits2::eColorAttachmentOutput
     );
 
+    // rendering settings relating to how to render
     vk::ClearValue clearColor = vk::ClearColorValue { 0.f, 0.f, 0.f, 1.f };
     vk::RenderingAttachmentInfo attachmentInfo {
       .imageView = swapchainImageViews[imageIndex],
@@ -625,6 +747,7 @@ private:
       .clearValue = clearColor
     };
 
+    // rendering settings relating to where to render to
     vk::RenderingInfo renderingInfo = {
       .renderArea = {
         .offset = { 0, 0 },
@@ -635,6 +758,7 @@ private:
       .pColorAttachments = &attachmentInfo
     };
 
+    // our viewport is just the whole image
     vk::Viewport viewport {
       .x =  0.0f,
       .y = 0.0f,
@@ -644,6 +768,7 @@ private:
       .maxDepth = 1.0f
     };
 
+    // yippee yippee yay yay rendering!
     commandBuffer.beginRendering(renderingInfo);
     commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
     commandBuffer.setViewport(0, viewport);
@@ -652,6 +777,7 @@ private:
     commandBuffer.draw(3, 1, 0, 0);
     commandBuffer.endRendering();
 
+    // now we want the image buffer to be ready to present
     transitionImageLayout(
       imageIndex,
       vk::ImageLayout::eColorAttachmentOptimal,
@@ -702,6 +828,7 @@ private:
     commandBuffers[frameIndex].pipelineBarrier2(dependencyInfo);
   }
 
+  // this is used when the window is resized or minimised
   void recreateSwapchain() {
     int width, height;
     glfwGetFramebufferSize(window, &width, &height);
