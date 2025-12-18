@@ -5,7 +5,7 @@ struct UniformBuffer {
 }
 
 struct VsInput {
-  float2 pos;
+  float3 pos;
   float3 color;
   float2 texCoord;
 }
@@ -22,7 +22,7 @@ ConstantBuffer<UniformBuffer> ubo;
 VsOutput vert_main(VsInput input) {
   VsOutput output;
   float4x4 mat = mul(ubo.proj, mul(ubo.view, ubo.model));
-  output.sv_position = mul(mat, float4(input.pos, 0.0, 1.0));
+  output.sv_position = mul(mat, float4(input.pos, 1.0));
   output.color = input.color;
   output.texCoord = input.texCoord;
   return output;
