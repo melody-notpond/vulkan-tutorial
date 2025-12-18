@@ -9,13 +9,20 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/hash.hpp>
+
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb/stb_image.h>
+
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
 
 #include <cstdlib>
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
+#include <unordered_map>
 
 #include "shaders.h"
 
@@ -54,7 +61,22 @@ struct Vertex {
       }
     };
   }
+
+  bool operator==(const Vertex& other) const {
+    return pos == other.pos && color == other.color &&
+      texCoord == other.texCoord;
+  }
 };
+
+namespace std {
+  template<> struct hash<Vertex> {
+    size_t operator()(Vertex const& vertex) const {
+      return ((hash<glm::vec3>()(vertex.pos) ^
+        (hash<glm::vec3>()(vertex.color) << 1)) >> 1) ^
+        (hash<glm::vec2>()(vertex.texCoord) << 1);
+    }
+  };
+}
 
 struct UniformBuffer {
   alignas(16) glm::mat4 model;
@@ -77,6 +99,8 @@ private:
 
   static constexpr uint32_t WIDTH = 800;
   static constexpr uint32_t HEIGHT = 600;
+  const std::string MODEL_PATH = "assets/viking_room.obj";
+  const std::string TEXTURE_PATH = "assets/viking_room.png";
 
   // frames in flight basically give an extra frame for the cpu to work on so
   // the cpu do other work while the gpu renders instead of waiting for the gpu
@@ -191,23 +215,9 @@ private:
   // submitted
   std::vector<vk::raii::Fence> drawFences;
 
-  // rectangle that we wanna render
-  const std::vector<Vertex> vertices = {
-    {{-0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-    {{0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-    {{0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-    {{-0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}},
-
-    {{-0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-    {{0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-    {{0.5f, 0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-    {{-0.5f, 0.5f, -0.5f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}}
-  };
-
-  const std::vector<uint16_t> indices = {
-    0, 1, 2, 2, 3, 0,
-    4, 5, 6, 6, 7, 4
-  };
+  // model data
+  std::vector<Vertex> vertices;
+  std::vector<uint32_t> indices;
 
   void initWindow() {
     glfwInit();
@@ -232,6 +242,7 @@ private:
     createTextureImage();
     createTextureImageView();
     createTextureSampler();
+    loadModel();
     createVertexBuffer();
     createIndexBuffer();
     createUniformBuffers();
@@ -794,7 +805,7 @@ private:
   void createTextureImage() {
     // load raw pixel data
     int texWidth, texHeight, texChannels;
-    stbi_uc *pixels = stbi_load("assets/texture.jpg", &texWidth, &texHeight,
+    stbi_uc *pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight,
       &texChannels, STBI_rgb_alpha);
     if (!pixels)
       throw std::runtime_error("could not open texture image :(");
@@ -970,6 +981,42 @@ private:
     };
 
     textureSampler = vk::raii::Sampler(device, samplerInfo);
+  }
+
+  void loadModel() {
+    tinyobj::attrib_t attrs;
+    std::vector<tinyobj::shape_t> shapes;
+    std::vector<tinyobj::material_t> materials;
+    std::string warn, err;
+
+    if (!tinyobj::LoadObj(&attrs, &shapes, &materials, &warn, &err,
+        MODEL_PATH.c_str()))
+      throw std::runtime_error(warn + "\n" + err);
+
+    std::unordered_map<Vertex, uint32_t> uniqueVertices;
+    for (const auto &shape : shapes) {
+      for (const auto index : shape.mesh.indices) {
+        Vertex vertex {
+          .pos = {
+            attrs.vertices[3 * index.vertex_index + 0],
+            attrs.vertices[3 * index.vertex_index + 1],
+            attrs.vertices[3 * index.vertex_index + 2]
+          },
+          .color = {1., 1., 1.},
+          .texCoord = {
+            attrs.texcoords[2 * index.texcoord_index + 0],
+            1. - attrs.texcoords[2 * index.texcoord_index + 1]
+          }
+        };
+
+        if (!uniqueVertices.contains(vertex)) {
+          uint32_t index = vertices.size();
+          vertices.push_back(vertex);
+          indices.push_back(index);
+          uniqueVertices[vertex] = index;
+        } else indices.push_back(uniqueVertices[vertex]);
+      }
+    }
   }
 
   void createVertexBuffer() {
@@ -1309,10 +1356,11 @@ private:
   }
 
   void updateUniforms() {
-    static auto start = std::chrono::high_resolution_clock::now();
-    auto now = std::chrono::high_resolution_clock::now();
-    float time = std::chrono::duration<float, std::chrono::seconds::period>(
-      now - start).count();
+    // static auto start = std::chrono::high_resolution_clock::now();
+    // auto now = std::chrono::high_resolution_clock::now();
+    // float time = std::chrono::duration<float, std::chrono::seconds::period>(
+    //   now - start).count();
+    float time = 0.;
 
     float aspectRatio = static_cast<float>(swapchainExtent.width) /
       static_cast<float>(swapchainExtent.height);
@@ -1402,7 +1450,7 @@ private:
       vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
     commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
     commandBuffer.bindVertexBuffers(0, *vertexBuffer, {0});
-    commandBuffer.bindIndexBuffer(indexBuffer, 0, vk::IndexType::eUint16);
+    commandBuffer.bindIndexBuffer(indexBuffer, 0, vk::IndexType::eUint32);
     commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics,
       pipelineLayout, 0, *descriptorSets[frameIndex], nullptr);
     commandBuffer.drawIndexed(indices.size(), 1, 0, 0, 0);
