@@ -19,7 +19,7 @@
 #include <tiny_obj_loader.h>
 
 #include <cstdlib>
-#include <chrono>
+// #include <chrono>
 #include <iostream>
 #include <stdexcept>
 #include <unordered_map>
@@ -235,10 +235,11 @@ private:
     createLogicalDevice();
     createSwapchain();
     createImageViews();
+    createDepthResources();
+    createCommandPool();
+    createCommandBuffers();
     createDescriptorSetLayout();
     createGraphicsPipeline();
-    createCommandPool();
-    createDepthResources();
     createTextureImage();
     createTextureImageView();
     createTextureSampler();
@@ -248,7 +249,6 @@ private:
     createUniformBuffers();
     createDescriptorPool();
     createDescriptorSets();
-    createCommandBuffers();
     createSyncObjects();
   }
 
@@ -714,7 +714,6 @@ private:
     pipelineLayout = vk::raii::PipelineLayout(device, pipelineLayoutInfo);
 
     // depth and stencil info
-    depthFormat = findDepthFormat();
     vk::PipelineDepthStencilStateCreateInfo depthInfo {
       .depthTestEnable = true,
       .depthWriteEnable = true,
@@ -762,6 +761,7 @@ private:
   }
 
   void createDepthResources() {
+    depthFormat = findDepthFormat();
     createImage(depthImage, depthMem, swapchainExtent.width,
       swapchainExtent.height, depthFormat, vk::ImageTiling::eOptimal,
       vk::ImageUsageFlagBits::eDepthStencilAttachment,
@@ -826,7 +826,7 @@ private:
     stbi_image_free(pixels);
 
     // create image
-    createImage(texture, textureMem, static_cast<int>(texWidth),
+    createImage(texture, textureMem, texWidth,
       static_cast<int>(texHeight), vk::Format::eR8G8B8A8Srgb,
       vk::ImageTiling::eOptimal,
       vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
