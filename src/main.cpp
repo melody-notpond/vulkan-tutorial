@@ -1336,7 +1336,7 @@ private:
 
       result = queue.presentKHR(presentInfo);
 
-    // check validity of swapchain
+      // check validity of swapchain
       if (result == vk::Result::eErrorOutOfDateKHR
         || result == vk::Result::eSuboptimalKHR || frameResized) {
         frameResized = false;
